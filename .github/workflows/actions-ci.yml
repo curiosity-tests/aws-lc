@@ -1,13 +1,31 @@
 name: General CI Tests
 on:
+  workflow_dispatch:
+    inputs:
+      leg:
+        description: "baseline (uninstrumented) or instrumented (under chalk/curiosity)"
+        type: choice
+        options: [instrumented, baseline]
+        default: instrumented
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
+      racecar_run:
+        description: "racecar correlation token, echoed into the run name"
+        type: string
+        default: ""
   push:
     branches: ["main", "fips-*"]
   pull_request:
     branches: ["*"]
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref_name }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ inputs.leg || 'push' }}-${{ inputs.racecar_run }}
+  cancel-in-progress: false
 env:
+  # The one variable that separates the arms: on baseline, action-checkout
+  # skips its Set up Chalk step entirely.
+  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
   GOPROXY: https://proxy.golang.org,direct
   # The Intel SDE pins live in .github/docker_images/dependencies.env (single
   # source of truth). The commented-out MSVC-SDE-32-bit job below must load
@@ -23,6 +41,9 @@ env:
 
 permissions:
   contents: read
+  id-token: write
+
+run-name: "General CI Tests ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
 
 jobs:
   # MacOS and Windows GHA runners are more expensive, so we do a sanity test run before proceeding.
@@ -32,141 +53,24 @@ jobs:
       AWS_LC_SSL_TEST_RUNNER_PEEK_ROUNDS: 100
     steps:
       - name: Git clone the repository
-        uses: actions/checkout@v7
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - name: Sanity Test Run
         run: |
           sudo apt-get update -o Acquire::Languages=none -o Acquire::Translation=none
           sudo apt-get install ninja-build
           cmake -GNinja -Btest_build_dir
           ninja -C test_build_dir run_tests
-
-  macOS-x86:
-    if: github.repository_owner == 'aws'
-    needs: [sanity-test-run]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - "macos-15-intel"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
-        with:
-          go-version: ">=1.18"
-      - name: Build ${{ env.PACKAGE_NAME }}
-        run: |
-          ./tests/ci/run_posix_tests.sh
-      - name: Test timing summary
-        if: always()
-        run: python3 tests/ci/test_results_summary.py "${{ github.workspace }}/gtest_reports" >> $GITHUB_STEP_SUMMARY
-
-  macOS-x86-FIPS:
-    if: github.repository_owner == 'aws'
-    needs: [sanity-test-run]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - "macos-15-intel"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
-        with:
-          go-version: ">=1.18"
-      - name: Build ${{ env.PACKAGE_NAME }} with FIPS mode
-        run: |
-          ./tests/ci/run_fips_tests.sh
-      - name: Test timing summary
-        if: always()
-        run: python3 tests/ci/test_results_summary.py "${{ github.workspace }}/gtest_reports" >> $GITHUB_STEP_SUMMARY
-
-  macOS-ARM:
-    if: github.repository_owner == 'aws'
-    needs: [sanity-test-run]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - "macos-14"
-          - "macos-15"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
-        with:
-          go-version: ">=1.18"
-      - name: Build ${{ env.PACKAGE_NAME }}
-        run: |
-          ./tests/ci/run_posix_tests.sh
-      - name: Test timing summary
-        if: always()
-        run: python3 tests/ci/test_results_summary.py "${{ github.workspace }}/gtest_reports" >> $GITHUB_STEP_SUMMARY
-
-  windows:
-    if: github.repository_owner == 'aws'
-    needs: [sanity-test-run]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - "windows-latest"
-          - "windows-11-arm"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
-        with:
-          go-version: ">=1.18"
-      - name: Install NASM
-        if: "!endsWith(matrix.os, '-arm')"
-        uses: ilammy/setup-nasm@v1.5.1
-      - name: Build/Test (x64)
-        if: "!endsWith(matrix.os, '-arm')"
-        run: |
-          ./tests/ci/run_windows_tests.bat auto x64
-      - name: Build/Test (ARM64)
-        if: endsWith(matrix.os, '-arm')
-        run: |
-          ./tests/ci/run_windows_tests.bat auto arm64
-
-  macOS-ARM-FIPS:
-    if: github.repository_owner == 'aws'
-    needs: [sanity-test-run]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - "macos-14"
-          - "macos-15"
-        clang:
-          - 22
-          - 0 # default
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
-        with:
-          go-version: ">=1.18"
-      - if: matrix.clang == 22
-        run: |
-          brew install llvm@22
-          LLVM_PREFIX="$(brew --prefix llvm@22)"
-          echo "CC=${LLVM_PREFIX}/bin/clang" >> $GITHUB_ENV
-          echo "CXX=${LLVM_PREFIX}/bin/clang++" >> $GITHUB_ENV
-          echo "LDFLAGS=-L${LLVM_PREFIX}/lib/c++ -L${LLVM_PREFIX}/lib -lc++abi" >> $GITHUB_ENV
-          echo "CPPFLAGS=-I${LLVM_PREFIX}/include" >> $GITHUB_ENV
-          echo "CFLAGS=-I${LLVM_PREFIX}/include" >> $GITHUB_ENV
-          echo "CXXFLAGS=-I${LLVM_PREFIX}/include -stdlib=libc++" >> $GITHUB_ENV
-          echo "DYLD_LIBRARY_PATH=${LLVM_PREFIX}/lib" >> $GITHUB_ENV
-          echo "${LLVM_PREFIX}/bin" >> $GITHUB_PATH
-      - name: Build ${{ env.PACKAGE_NAME }} with FIPS mode
-        run: |
-          ./tests/ci/run_fips_tests.sh
-      - name: Test timing summary
-        if: always()
-        run: python3 tests/ci/test_results_summary.py "${{ github.workspace }}/gtest_reports" >> $GITHUB_STEP_SUMMARY
 
   compiler-tests:
     name: >-
@@ -203,7 +107,31 @@ jobs:
     container:
       image: ghcr.io/mattkretz/cplusplus-ci/${{ matrix.compiler }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Install curl/bash for action-checkout (racecar; ungated, both arms)
+        shell: sh
+        run: |
+          command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && exit 0
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates bash
+          elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates bash
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y curl ca-certificates bash
+          elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates bash
+          elif command -v zypper >/dev/null 2>&1; then zypper -n install curl ca-certificates bash
+          fi
+
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-go@v6
         with:
           go-version: ">=1.18"
@@ -230,7 +158,7 @@ jobs:
   sanitizer-tests:
     name: sanitizer - ${{ matrix.arch.name }} - ${{ matrix.config.name }} [${{ matrix.shard_index }}/${{ matrix.config.total_shards }}]
     needs: [sanity-test-run]
-    if: github.repository_owner == 'aws'
+    if: github.repository_owner == 'curiosity-tests'
     runs-on: ${{ matrix.arch.runner }}
     env:
       GOFLAGS: "-buildvcs=false"
@@ -275,7 +203,19 @@ jobs:
               total_shards: 1
             shard_index: 0
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-go@v6
         with:
           go-version: ">=1.18"
@@ -315,7 +255,31 @@ jobs:
       image: rust:latest
       options: "--platform linux/${{ (matrix.config.arch == 'aarch64' && 'arm64/v8') || 'amd64'}}"
     steps:
-      - uses: actions/checkout@v7
+      - name: Install curl/bash for action-checkout (racecar; ungated, both arms)
+        shell: sh
+        run: |
+          command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && exit 0
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates bash
+          elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates bash
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y curl ca-certificates bash
+          elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates bash
+          elif command -v zypper >/dev/null 2>&1; then zypper -n install curl ca-certificates bash
+          fi
+
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-go@v6
         with:
           go-version: ">=1.18"
@@ -344,7 +308,31 @@ jobs:
         gcc_version: ["9", "10", "11", "12", "13", "14", "15", "16"]
         fips: ["0", "1"]
     steps:
-      - uses: actions/checkout@v7
+      - name: Install curl/bash for action-checkout (racecar; ungated, both arms)
+        shell: sh
+        run: |
+          command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && exit 0
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates bash
+          elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates bash
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y curl ca-certificates bash
+          elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates bash
+          elif command -v zypper >/dev/null 2>&1; then zypper -n install curl ca-certificates bash
+          fi
+
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-go@v6
         with:
           go-version: ">=1.18"
@@ -368,7 +356,7 @@ jobs:
         run: cmake --build ./build --target run_tests
 
   arm-clang-2604-tests:
-    if: github.repository_owner == 'aws'
+    if: github.repository_owner == 'curiosity-tests'
     needs: [sanity-test-run]
     name: arm64 - clang${{ matrix.clang_version }} - ${{ (matrix.fips == 1 && 'FIPS') || 'non-FIPS' }}
     runs-on: ubuntu-26.04-arm
@@ -380,7 +368,19 @@ jobs:
         clang_version: ["22"]
         fips: ["0", "1"]
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-go@v6
         with:
           go-version: ">=1.18"
@@ -402,7 +402,7 @@ jobs:
         run: cmake --build ./build --target run_tests
 
   arm-clang-2404-tests:
-    if: github.repository_owner == 'aws'
+    if: github.repository_owner == 'curiosity-tests'
     needs: [sanity-test-run]
     name: arm64 - clang${{ matrix.clang_version }} - ${{ (matrix.fips == 1 && 'FIPS') || 'non-FIPS' }}
     runs-on: ubuntu-24.04-arm
@@ -421,7 +421,31 @@ jobs:
           - clang_version: "18"
             fips: "1"
     steps:
-      - uses: actions/checkout@v7
+      - name: Install curl/bash for action-checkout (racecar; ungated, both arms)
+        shell: sh
+        run: |
+          command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && exit 0
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates bash
+          elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates bash
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y curl ca-certificates bash
+          elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates bash
+          elif command -v zypper >/dev/null 2>&1; then zypper -n install curl ca-certificates bash
+          fi
+
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-go@v6
         with:
           go-version: ">=1.18"
@@ -444,7 +468,7 @@ jobs:
         run: cmake --build ./build --target run_tests
 
   arm-clang-2204-tests:
-    if: github.repository_owner == 'aws'
+    if: github.repository_owner == 'curiosity-tests'
     needs: [sanity-test-run]
     name: arm64 - clang ${{ matrix.clang_version }} - ${{ (matrix.fips == 1 && 'FIPS') || 'non-FIPS' }}
     runs-on: ubuntu-24.04-arm
@@ -459,7 +483,31 @@ jobs:
         clang_version: ["11", "12", "13"]
         fips: ["0", "1"]
     steps:
-      - uses: actions/checkout@v7
+      - name: Install curl/bash for action-checkout (racecar; ungated, both arms)
+        shell: sh
+        run: |
+          command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && exit 0
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates bash
+          elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates bash
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y curl ca-certificates bash
+          elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates bash
+          elif command -v zypper >/dev/null 2>&1; then zypper -n install curl ca-certificates bash
+          fi
+
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-go@v6
         with:
           go-version: ">=1.18"
@@ -482,7 +530,7 @@ jobs:
         run: cmake --build ./build --target run_tests
 
   arm-clang-2004-tests:
-    if: github.repository_owner == 'aws'
+    if: github.repository_owner == 'curiosity-tests'
     needs: [sanity-test-run]
     name: arm64 - clang ${{ matrix.clang_version }} - ${{ (matrix.fips == 1 && 'FIPS') || 'non-FIPS' }}
     runs-on: ubuntu-24.04-arm
@@ -497,7 +545,31 @@ jobs:
         clang_version: ["7", "8", "9", "10"]
         fips: ["0", "1"]
     steps:
-      - uses: actions/checkout@v7
+      - name: Install curl/bash for action-checkout (racecar; ungated, both arms)
+        shell: sh
+        run: |
+          command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && exit 0
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates bash
+          elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates bash
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y curl ca-certificates bash
+          elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates bash
+          elif command -v zypper >/dev/null 2>&1; then zypper -n install curl ca-certificates bash
+          fi
+
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-go@v6
         with:
           go-version: ">=1.18"
@@ -520,7 +592,7 @@ jobs:
         run: cmake --build ./build --target run_tests
 
   gcc-14-hardened:
-    if: github.repository_owner == 'aws'
+    if: github.repository_owner == 'curiosity-tests'
     needs: [sanity-test-run]
     env:
       GOFLAGS: "-buildvcs=false"
@@ -533,7 +605,31 @@ jobs:
     runs-on: ubuntu-24.04
     container: gcc:14.4
     steps:
-      - uses: actions/checkout@v7
+      - name: Install curl/bash for action-checkout (racecar; ungated, both arms)
+        shell: sh
+        run: |
+          command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && exit 0
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates bash
+          elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates bash
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y curl ca-certificates bash
+          elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates bash
+          elif command -v zypper >/dev/null 2>&1; then zypper -n install curl ca-certificates bash
+          fi
+
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-go@v6
         with:
           go-version: ">=1.18"
@@ -580,7 +676,31 @@ jobs:
     container:
       image: ghcr.io/mattkretz/cplusplus-ci/${{ matrix.compiler }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Install curl/bash for action-checkout (racecar; ungated, both arms)
+        shell: sh
+        run: |
+          command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && exit 0
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates bash
+          elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates bash
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y curl ca-certificates bash
+          elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates bash
+          elif command -v zypper >/dev/null 2>&1; then zypper -n install curl ca-certificates bash
+          fi
+
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-go@v6
         with:
           go-version: ">=1.18"
@@ -611,7 +731,19 @@ jobs:
     env:
       DOCKER_BUILDKIT: 1
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - name: Build Docker Image
         working-directory: .github/docker_images/gcc-4.8
         run: |
@@ -620,38 +752,6 @@ jobs:
         run: |
           docker run -v "${GITHUB_WORKSPACE}:/awslc" "gcc-4.8"
 
-  alpine-linux-x86:
-    needs: [sanity-test-run]
-    strategy:
-      fail-fast: false
-      matrix:
-        tests:
-          [
-            /awslc/tests/ci/run_fips_tests.sh,
-            /awslc/tests/ci/run_posix_tests.sh,
-          ]
-        compiler:
-          [
-            --build-arg CC=clang --build-arg CXX=clang++,
-            --build-arg CC=gcc --build-arg CXX=g++,
-          ]
-    runs-on: ubuntu-latest
-    env:
-      DOCKER_BUILDKIT: 1
-    steps:
-      - uses: actions/checkout@v7
-      - name: Build Docker Image
-        working-directory: .github/docker_images/alpine-linux
-        env:
-          MATRIX_COMPILER: ${{ matrix.compiler }}
-        run: |
-          docker build -t alpine_linux ${MATRIX_COMPILER} .
-      - name: Run tests
-        env:
-          MATRIX_TESTS: ${{ matrix.tests }}
-        run: |
-          docker run -v "${GITHUB_WORKSPACE}:/awslc" \
-          alpine_linux "${MATRIX_TESTS}"
 
     # TODO: Investigate sudden hanging tests and failures in GHA runners (P114059413)
   #  MSVC-SDE-32-bit:
