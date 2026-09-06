@@ -158,7 +158,7 @@ jobs:
   sanitizer-tests:
     name: sanitizer - ${{ matrix.arch.name }} - ${{ matrix.config.name }} [${{ matrix.shard_index }}/${{ matrix.config.total_shards }}]
     needs: [sanity-test-run]
-    if: github.repository_owner == 'curiosity-tests'
+    if: github.repository_owner == 'aws'
     runs-on: ${{ matrix.arch.runner }}
     env:
       GOFLAGS: "-buildvcs=false"
@@ -293,7 +293,7 @@ jobs:
         run: cmake --build ./build --target crypto
 
   arm-gcc-tests:
-    if: github.repository_owner == 'curiosity-tests'
+    if: github.repository_owner == 'aws'
     needs: [sanity-test-run]
     name: arm64 - gcc${{ matrix.gcc_version }} - ${{ (matrix.fips == 1 && 'FIPS') || 'non-FIPS' }}
     runs-on: ubuntu-24.04-arm
@@ -356,7 +356,7 @@ jobs:
         run: cmake --build ./build --target run_tests
 
   arm-clang-2604-tests:
-    if: github.repository_owner == 'curiosity-tests'
+    if: github.repository_owner == 'aws'
     needs: [sanity-test-run]
     name: arm64 - clang${{ matrix.clang_version }} - ${{ (matrix.fips == 1 && 'FIPS') || 'non-FIPS' }}
     runs-on: ubuntu-26.04-arm
@@ -402,7 +402,7 @@ jobs:
         run: cmake --build ./build --target run_tests
 
   arm-clang-2404-tests:
-    if: github.repository_owner == 'curiosity-tests'
+    if: github.repository_owner == 'aws'
     needs: [sanity-test-run]
     name: arm64 - clang${{ matrix.clang_version }} - ${{ (matrix.fips == 1 && 'FIPS') || 'non-FIPS' }}
     runs-on: ubuntu-24.04-arm
@@ -468,7 +468,7 @@ jobs:
         run: cmake --build ./build --target run_tests
 
   arm-clang-2204-tests:
-    if: github.repository_owner == 'curiosity-tests'
+    if: github.repository_owner == 'aws'
     needs: [sanity-test-run]
     name: arm64 - clang ${{ matrix.clang_version }} - ${{ (matrix.fips == 1 && 'FIPS') || 'non-FIPS' }}
     runs-on: ubuntu-24.04-arm
@@ -530,7 +530,7 @@ jobs:
         run: cmake --build ./build --target run_tests
 
   arm-clang-2004-tests:
-    if: github.repository_owner == 'curiosity-tests'
+    if: github.repository_owner == 'aws'
     needs: [sanity-test-run]
     name: arm64 - clang ${{ matrix.clang_version }} - ${{ (matrix.fips == 1 && 'FIPS') || 'non-FIPS' }}
     runs-on: ubuntu-24.04-arm
@@ -592,7 +592,7 @@ jobs:
         run: cmake --build ./build --target run_tests
 
   gcc-14-hardened:
-    if: github.repository_owner == 'curiosity-tests'
+    if: github.repository_owner == 'aws'
     needs: [sanity-test-run]
     env:
       GOFLAGS: "-buildvcs=false"
